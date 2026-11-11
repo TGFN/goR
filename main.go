@@ -562,58 +562,35 @@ func fxGlitch(base *image.RGBA, n int, rng *rand.Rand) []*image.RGBA {
 // typeHoldSec: số giây con trỏ nhấp nháy sau khi gõ xong, trước khi GIF lặp lại.
 const typeHoldSec = 2.0
 
+// typeHoldFrames: số frame của pha giữ trỏ (độc lập với pha gõ).
+func typeHoldFrames(fps int) int {
+	return int(typeHoldSec * float64(fps))
+}
+
+// typeTotalFrames: tổng frame = pha gõ (theo dur) + pha giữ trỏ.
+func typeTotalFrames(fps int, dur float64) int {
+	hold := typeHoldFrames(fps)
+	typing := clampInt(int(float64(fps)*dur), 1, maxFrames-hold)
+	return typing + hold
+}
+
+// fxType ghép 2 pha riêng biệt: gõ chữ, rồi giữ chữ đầy đủ cho trỏ nhấp nháy.
+// n là tổng frame (typeTotalFrames); pha giữ luôn đúng typeHoldFrames(fps).
 func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg color.RGBA, n, fps int, rng *rand.Rand) []*image.RGBA {
-	out := make([]*image.RGBA, 0, n)
 	face := getFace(fontName, size)
 	mt := face.Metrics()
 	cw := int(size) / 3
 	if cw < 4 {
 		cw = 4
 	}
-
 	// baseline giữ ở đơn vị 26.6 để chính xác, đổi về int ngay khi dùng
 	baseline26 := fixed.I(h)/2 + (mt.Ascent-mt.Descent)/2
 	cursorTop := int((baseline26 - mt.Ascent) >> 6)
 	cursorBot := int((baseline26 + mt.Descent) >> 6)
 
-	// 2 pha: gõ chữ, rồi giữ chữ đầy đủ đúng typeHoldSec giây cho con trỏ nhấp nháy
-	holdFrames := int(typeHoldSec * float64(fps))
-	typeFrames := n - holdFrames
-	if typeFrames < 1 {
-		typeFrames = 1
-	}
-	if typeFrames > n {
-		typeFrames = n
-	}
-	// nửa chu kỳ nhấp nháy ~0.33s, tính theo fps nên luôn đúng thời gian thực
-	half := fps / 3
-	if half < 1 {
-		half = 1
-	}
-
-	for i := 0; i < n; i++ {
-		var partial string
-		var cursorOn bool
-
-		if i < typeFrames {
-			// pha 1: gõ chữ
-			chars := len(text) * (i + 1) / typeFrames
-			if chars < 1 && len(text) > 0 {
-				chars = 1
-			}
-			if chars > len(text) {
-				chars = len(text)
-			}
-			partial = text[:chars]
-			cursorOn = (i/2)%2 == 0
-		} else {
-			// pha 2: chữ đầy đủ, con trỏ nhấp nháy
-			partial = text
-			cursorOn = ((i-typeFrames)/half)%2 == 0
-		}
-
+	// vẽ 1 frame: chữ đã gõ + (tuỳ chọn) con trỏ
+	draw := func(partial string, cursorOn bool) *image.RGBA {
 		f := makeBase(partial, fontName, w, h, c, size, bg)
-
 		if cursorOn {
 			d := &font.Drawer{Dst: f, Src: image.NewUniform(c), Face: face}
 			meas := d.MeasureString(partial)
@@ -626,8 +603,35 @@ func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg colo
 				}
 			}
 		}
-		f = addNoise(f, 0.05, 0.3, rng)
-		out = append(out, f)
+		return addNoise(f, 0.05, 0.3, rng)
+	}
+
+	holdFrames := typeHoldFrames(fps)
+	typeFrames := n - holdFrames
+	if typeFrames < 1 {
+		typeFrames = 1
+	}
+	out := make([]*image.RGBA, 0, typeFrames+holdFrames)
+
+	// pha 1: gõ chữ (chỉ phụ thuộc typeFrames)
+	for i := 0; i < typeFrames; i++ {
+		chars := len(text) * (i + 1) / typeFrames
+		if chars < 1 && len(text) > 0 {
+			chars = 1
+		}
+		if chars > len(text) {
+			chars = len(text)
+		}
+		out = append(out, draw(text[:chars], (i/2)%2 == 0))
+	}
+
+	// pha 2: giữ chữ đầy đủ, trỏ nhấp nháy (chỉ phụ thuộc holdFrames); bắt đầu bằng trỏ sáng
+	half := fps / 3 // nửa chu kỳ ~0.33s
+	if half < 1 {
+		half = 1
+	}
+	for i := 0; i < holdFrames; i++ {
+		out = append(out, draw(text, (i/half)%2 == 0))
 	}
 	return out
 }
@@ -781,9 +785,7 @@ func handleRender(w http.ResponseWriter, r *http.Request) {
 	dur := math.Min(10, atof(q.Get("dur"), 2.5))
 	n := clampInt(int(float64(fps)*dur), 1, maxFrames)
 	if effect == "type" {
-		// dur = thời gian gõ; cộng thêm typeHoldSec giây con trỏ nhấp nháy
-		hold := int(typeHoldSec * float64(fps))
-		n = clampInt(int(float64(fps)*dur), 1, maxFrames-hold) + hold
+		n = typeTotalFrames(fps, dur) // dur = thời gian gõ, cộng riêng pha giữ trỏ
 	}
 
 	var seed int64
