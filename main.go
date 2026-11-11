@@ -14,12 +14,23 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 
 	"golang.org/x/image/font"
+	"golang.org/x/image/font/gofont/gobold"
+	"golang.org/x/image/font/gofont/gobolditalic"
+	"golang.org/x/image/font/gofont/goitalic"
+	"golang.org/x/image/font/gofont/gomono"
 	"golang.org/x/image/font/gofont/gomonobold"
+	"golang.org/x/image/font/gofont/gomonobolditalic"
+	"golang.org/x/image/font/gofont/gomonoitalic"
+	"golang.org/x/image/font/gofont/goregular"
+	"golang.org/x/image/font/gofont/gosmallcaps"
+	"golang.org/x/image/font/gofont/gosmallcapsitalic"
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/math/fixed"
 )
@@ -33,9 +44,86 @@ const (
 var (
 	cacheDir = getEnv("CACHE_DIR", "cache")
 	port     = getEnv("PORT", "8080")
+	fontsDir = getEnv("FONTS_DIR", "fonts")
 	faceMu   sync.Mutex
-	faceMap  = map[float64]font.Face{}
+	faceMap  = map[faceKey]font.Face{}
+	nameRe   = regexp.MustCompile(`^[a-z0-9_-]{1,40}$`)
 )
+
+const defaultFont = "monobold"
+
+type faceKey struct {
+	name string
+	size float64
+}
+
+// font có sẵn trong golang.org/x/image (không cần tải thêm)
+var builtinFonts = map[string][]byte{
+	"mono":            gomono.TTF,
+	"monobold":        gomonobold.TTF,
+	"monoitalic":      gomonoitalic.TTF,
+	"monobolditalic":  gomonobolditalic.TTF,
+	"regular":         goregular.TTF,
+	"bold":            gobold.TTF,
+	"italic":          goitalic.TTF,
+	"bolditalic":      gobolditalic.TTF,
+	"smallcaps":       gosmallcaps.TTF,
+	"smallcapsitalic": gosmallcapsitalic.TTF,
+}
+
+// chuẩn hoá tên font; trả về defaultFont nếu không tồn tại
+func resolveFont(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || !nameRe.MatchString(name) {
+		return defaultFont
+	}
+	if _, ok := builtinFonts[name]; ok {
+		return name
+	}
+	for _, ext := range []string{".ttf", ".otf"} {
+		if _, err := os.Stat(filepath.Join(fontsDir, name+ext)); err == nil {
+			return name
+		}
+	}
+	return defaultFont
+}
+
+func fontData(name string) []byte {
+	if b, ok := builtinFonts[name]; ok {
+		return b
+	}
+	for _, ext := range []string{".ttf", ".otf"} {
+		if b, err := os.ReadFile(filepath.Join(fontsDir, name+ext)); err == nil {
+			return b
+		}
+	}
+	return builtinFonts[defaultFont]
+}
+
+func listFonts() []string {
+	seen := map[string]bool{}
+	for k := range builtinFonts {
+		seen[k] = true
+	}
+	if ents, err := os.ReadDir(fontsDir); err == nil {
+		for _, e := range ents {
+			n := strings.ToLower(e.Name())
+			ext := filepath.Ext(n)
+			if ext == ".ttf" || ext == ".otf" {
+				b := strings.TrimSuffix(n, ext)
+				if nameRe.MatchString(b) {
+					seen[b] = true
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
 
 func getEnv(k, d string) string {
 	if v := os.Getenv(k); v != "" {
@@ -44,15 +132,20 @@ func getEnv(k, d string) string {
 	return d
 }
 
-func getFace(size float64) font.Face {
+func getFace(name string, size float64) font.Face {
 	faceMu.Lock()
 	defer faceMu.Unlock()
-	if f, ok := faceMap[size]; ok {
+	k := faceKey{name, size}
+	if f, ok := faceMap[k]; ok {
 		return f
 	}
-	parsed, err := opentype.Parse(gomonobold.TTF)
+	parsed, err := opentype.Parse(fontData(name))
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("font %q lỗi (%v), dùng %s", name, err, defaultFont)
+		parsed, err = opentype.Parse(builtinFonts[defaultFont])
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 	f, err := opentype.NewFace(parsed, &opentype.FaceOptions{
 		Size: size, DPI: 72, Hinting: font.HintingFull,
@@ -60,7 +153,7 @@ func getFace(size float64) font.Face {
 	if err != nil {
 		log.Fatal(err)
 	}
-	faceMap[size] = f
+	faceMap[k] = f
 	return f
 }
 
@@ -80,7 +173,7 @@ func parseHex(s string) color.RGBA {
 	return color.RGBA{uint8(r), uint8(g), uint8(b), 255}
 }
 
-func makeBase(text string, w, h int, c color.RGBA, size float64, bg color.RGBA) *image.RGBA {
+func makeBase(text, fontName string, w, h int, c color.RGBA, size float64, bg color.RGBA) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	if bg.A > 0 {
 		for i := 0; i < len(img.Pix); i += 4 {
@@ -90,15 +183,58 @@ func makeBase(text string, w, h int, c color.RGBA, size float64, bg color.RGBA) 
 	if text == "" {
 		return img
 	}
-	face := getFace(size)
-	d := &font.Drawer{Dst: img, Src: image.NewUniform(c), Face: face}
+	face := getFace(fontName, size)
+	d := &font.Drawer{Src: image.NewUniform(c), Face: face}
 	m := d.MeasureString(text)
 	mt := face.Metrics()
-	d.Dot = fixed.Point26_6{
-		X: (fixed.I(w) - m) / 2,
-		Y: fixed.I(h)/2 + (mt.Ascent-mt.Descent)/2,
+
+	// canvas tạm vừa khít glyph — Drawer không thể vẽ tràn
+	tw := int(m >> 6)
+	th := int((mt.Ascent + mt.Descent) >> 6)
+	if tw < 1 {
+		tw = 1
 	}
+	if th < 1 {
+		th = 1
+	}
+
+	tmp := image.NewRGBA(image.Rect(0, 0, tw, th))
+	d.Dst = tmp
+	d.Dot = fixed.Point26_6{X: 0, Y: mt.Ascent}
 	d.DrawString(text)
+
+	// căn giữa ngang, căn giữa dọc
+	dx := (w - tw) / 2
+	dy := h/2 - th/2
+
+	for y := 0; y < th; y++ {
+		ty := dy + y
+		if ty < 0 || ty >= h {
+			continue
+		}
+		for x := 0; x < tw; x++ {
+			tx := dx + x
+			if tx < 0 || tx >= w {
+				continue
+			}
+			si := tmp.PixOffset(x, y)
+			sa := uint32(tmp.Pix[si+3])
+			if sa == 0 {
+				continue
+			}
+			di := img.PixOffset(tx, ty)
+			if sa == 255 {
+				copy(img.Pix[di:di+4], tmp.Pix[si:si+4])
+				continue
+			}
+			da := uint32(img.Pix[di+3])
+			inv := 255 - sa
+			img.Pix[di+0] = uint8(uint32(tmp.Pix[si+0]) + uint32(img.Pix[di+0])*inv/255)
+			img.Pix[di+1] = uint8(uint32(tmp.Pix[si+1]) + uint32(img.Pix[di+1])*inv/255)
+			img.Pix[di+2] = uint8(uint32(tmp.Pix[si+2]) + uint32(img.Pix[di+2])*inv/255)
+			img.Pix[di+3] = uint8(sa + da*inv/255)
+		}
+	}
 	return img
 }
 
@@ -423,43 +559,43 @@ func fxGlitch(base *image.RGBA, n int, rng *rand.Rand) []*image.RGBA {
 	return out
 }
 
-func fxType(text string, w, h int, c color.RGBA, size float64, bg color.RGBA, n int, rng *rand.Rand) []*image.RGBA {
-out := make([]*image.RGBA, 0, n)
-face := getFace(size)
-mt := face.Metrics()
-cw := int(size) / 3
-if cw < 4 {
-cw = 4
-}
+func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg color.RGBA, n int, rng *rand.Rand) []*image.RGBA {
+	out := make([]*image.RGBA, 0, n)
+	face := getFace(fontName, size)
+	mt := face.Metrics()
+	cw := int(size) / 3
+	if cw < 4 {
+		cw = 4
+	}
 
-// baseline giữ ở đơn vị 26.6 để chính xác, đổi về int ngay khi dùng
-baseline26 := fixed.I(h)/2 + (mt.Ascent-mt.Descent)/2
-cursorTop := int((baseline26 - mt.Ascent) >> 6)
-cursorBot := int((baseline26 + mt.Descent) >> 6)
+	// baseline giữ ở đơn vị 26.6 để chính xác, đổi về int ngay khi dùng
+	baseline26 := fixed.I(h)/2 + (mt.Ascent-mt.Descent)/2
+	cursorTop := int((baseline26 - mt.Ascent) >> 6)
+	cursorBot := int((baseline26 + mt.Descent) >> 6)
 
-for i := 0; i < n; i++ {
-chars := len(text) * (i + 1) / n
-if chars < 1 && len(text) > 0 {
-chars = 1
-}
-partial := text[:chars]
-f := makeBase(partial, w, h, c, size, bg)
-if (i/2)%2 == 0 {
-d := &font.Drawer{Dst: f, Src: image.NewUniform(c), Face: face}
-meas := d.MeasureString(partial)
-x := int(((fixed.I(w)-meas)/2 + meas + fixed.I(4)) >> 6)
-for yy := cursorTop; yy < cursorBot; yy++ {
-for xx := x; xx < x+cw; xx++ {
-if xx >= 0 && xx < w && yy >= 0 && yy < h {
-f.SetRGBA(xx, yy, c)
-}
-}
-}
-}
-f = addNoise(f, 0.05, 0.3, rng)
-out = append(out, f)
-}
-return out
+	for i := 0; i < n; i++ {
+		chars := len(text) * (i + 1) / n
+		if chars < 1 && len(text) > 0 {
+			chars = 1
+		}
+		partial := text[:chars]
+		f := makeBase(partial, fontName, w, h, c, size, bg)
+		if (i/2)%2 == 0 {
+			d := &font.Drawer{Dst: f, Src: image.NewUniform(c), Face: face}
+			meas := d.MeasureString(partial)
+			x := int(((fixed.I(w)-meas)/2 + meas + fixed.I(4)) >> 6)
+			for yy := cursorTop; yy < cursorBot; yy++ {
+				for xx := x; xx < x+cw; xx++ {
+					if xx >= 0 && xx < w && yy >= 0 && yy < h {
+						f.SetRGBA(xx, yy, c)
+					}
+				}
+			}
+		}
+		f = addNoise(f, 0.05, 0.3, rng)
+		out = append(out, f)
+	}
+	return out
 }
 
 // ---------- GIF encode ----------
@@ -530,7 +666,7 @@ func encodeGIF(frames []*image.RGBA, fps int) ([]byte, error) {
 
 // ---------- dispatch ----------
 
-func renderFrames(text, effect string, w, h int, c1, bgStr string, size float64, fps, n int, seed int64) ([]*image.RGBA, error) {
+func renderFrames(text, effect, fontName string, w, h int, c1, bgStr string, size float64, fps, n int, seed int64) ([]*image.RGBA, error) {
 	rng := rand.New(rand.NewSource(seed))
 	c := parseHex(c1)
 	var bg color.RGBA
@@ -540,9 +676,9 @@ func renderFrames(text, effect string, w, h int, c1, bgStr string, size float64,
 		bg = parseHex(bgStr)
 	}
 	if effect == "type" {
-		return fxType(text, w, h, c, size, bg, n, rng), nil
+		return fxType(text, fontName, w, h, c, size, bg, n, rng), nil
 	}
-	base := makeBase(text, w, h, c, size, bg)
+	base := makeBase(text, fontName, w, h, c, size, bg)
 	switch effect {
 	case "vhs":
 		return fxVHS(base, n, rng), nil
@@ -591,6 +727,7 @@ func handleRender(w http.ResponseWriter, r *http.Request) {
 	if text == "" {
 		text = "content has been deleted"
 	}
+	fontName := resolveFont(q.Get("font"))
 	effect := q.Get("effect")
 	if effect == "" {
 		effect = "vhs"
@@ -617,15 +754,15 @@ func handleRender(w http.ResponseWriter, r *http.Request) {
 		seed = rand.Int63()
 	}
 
-	key := cacheKey(fmt.Sprintf("%s|%s|%d|%d|%s|%s|%.2f|%d|%d|%d",
-		text, effect, width, height, c1, bg, size, fps, n, seed))
+	key := cacheKey(fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%.2f|%d|%d|%d",
+		text, effect, fontName, width, height, c1, bg, size, fps, n, seed))
 	cf := filepath.Join(cacheDir, key+".gif")
 
 	var data []byte
 	if b, err := os.ReadFile(cf); err == nil {
 		data = b
 	} else {
-		frames, err := renderFrames(text, effect, width, height, c1, bg, size, fps, n, seed)
+		frames, err := renderFrames(text, effect, fontName, width, height, c1, bg, size, fps, n, seed)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
@@ -645,36 +782,115 @@ func handleRender(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+func baseURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
+}
+
+const publicBase = "https://gor-mez8.onrender.com"
+
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
+	base := publicBase
 	effects := []string{"vhs", "static", "dropout", "rgb", "flicker", "ghost", "roll", "glitch", "type"}
+
 	var cards strings.Builder
 	for _, e := range effects {
 		cards.WriteString(fmt.Sprintf(
-			`<div class="card"><h2>%s</h2><img src="/render?text=content+has+been+deleted&effect=%s&c1=ff2e88&fps=12&dur=2&size=28"></div>`,
+			`<div class="card"><h2>%s</h2><img src="/render?text=content+has+been+deleted&effect=%s&c1=ff2e88&fps=12&dur=2&size=28&seed=7"></div>`,
 			e, e))
 	}
-	page := `<!DOCTYPE html><html><head><meta charset="utf-8"><title>glitch effects</title>
+
+	var fonts strings.Builder
+	for _, f := range listFonts() {
+		fonts.WriteString(fmt.Sprintf(`<code>%s</code> `, f))
+	}
+
+	example := base + "/render?text=I+miss&effect=glitch&font=bolditalic&w=700&h=130&size=76&c1=d6d3d1&bg=0b0b0d&fps=15&dur=3&seed=7"
+	exampleEsc := strings.ReplaceAll(example, "&", "&amp;")
+
+	docs := `<section class="docs">
+<h1>docs</h1>
+<p>Generate glitchy text GIFs from a single URL. Drop it straight into a README or an <code>&lt;img&gt;</code> tag.</p>
+
+<h3>endpoint</h3>
+<pre>GET ` + base + `/render?text=...&amp;effect=...</pre>
+<pre>GET ` + base + `/fonts   (list available fonts)</pre>
+
+<h3>parameters</h3>
+<table>
+<tr><th>name</th><th>default</th><th>description</th></tr>
+<tr><td>text</td><td>content has been deleted</td><td>text content; use <code>+</code> or <code>%20</code> for spaces</td></tr>
+<tr><td>effect</td><td>vhs</td><td>vhs, static, dropout, rgb, flicker, ghost, roll, glitch, type</td></tr>
+<tr><td>font</td><td>monobold</td><td>see the font list below</td></tr>
+<tr><td>w</td><td>520</td><td>width, 16 to ` + strconv.Itoa(maxW) + `</td></tr>
+<tr><td>h</td><td>60</td><td>height, 16 to ` + strconv.Itoa(maxH) + `</td></tr>
+<tr><td>size</td><td>h - 20</td><td>font size in px (minimum 12)</td></tr>
+<tr><td>c1</td><td>ff2e88</td><td>text color, hex without <code>#</code> (or <code>%23</code>)</td></tr>
+<tr><td>bg</td><td>transparent</td><td>background hex color or <code>transparent</code></td></tr>
+<tr><td>fps</td><td>15</td><td>frames per second, 2 to 30</td></tr>
+<tr><td>dur</td><td>2.5</td><td>duration in seconds, max 10 (max ` + strconv.Itoa(maxFrames) + ` frames)</td></tr>
+<tr><td>seed</td><td>random</td><td>freezes the noise pattern. Always set it, e.g. <code>seed=7</code>, so the cache is reused</td></tr>
+</table>
+
+<h3>fonts</h3>
+<p>` + fonts.String() + `</p>
+<p class="muted">Custom fonts: drop a .ttf or .otf file into the <code>` + fontsDir + `/</code> directory, use a lowercase filename, then call <code>font=filename</code>. Unknown fonts fall back to <code>monobold</code>.</p>
+
+<h3>example</h3>
+<pre>` + exampleEsc + `</pre>
+<pre>&lt;img src="` + exampleEsc + `" alt="I miss" /&gt;</pre>
+<p><img src="` + strings.TrimPrefix(example, base) + `"></p>
+
+<h3>notes</h3>
+<ul>
+<li>Always set <code>seed</code> so the server doesn't mint a new GIF and write a new cache entry on every load.</li>
+<li>The first render is slower; hit the URL once before embedding it on GitHub.</li>
+<li>On Render's free tier, the server sleeps after ~15 minutes with no traffic.</li>
+</ul>
+</section>
+<h1>effects</h1>`
+
+	page := `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>glitch effects</title>
 <style>
-body{background:#0b0b0f;color:#eee;font-family:ui-monospace,monospace;padding:2rem}
-h1{font-size:.8rem;color:#71717a;letter-spacing:.2em;text-transform:uppercase}
+body{background:#0b0b0f;color:#d6d3d1;font-family:ui-monospace,monospace;padding:2rem;max-width:900px;margin:0 auto;line-height:1.5}
+h1{font-size:.8rem;color:#71717a;letter-spacing:.2em;text-transform:uppercase;margin-top:2rem}
+h3{font-size:.8rem;color:#b91c1c;letter-spacing:.15em;text-transform:uppercase;margin:1.6rem 0 .5rem}
+code,pre{background:#111;border:1px solid #222;border-radius:4px;color:#a8a29e}
+code{padding:.05rem .35rem}
+pre{padding:.6rem .8rem;overflow-x:auto;white-space:pre-wrap;word-break:break-all}
+table{border-collapse:collapse;width:100%;font-size:.85rem}
+th,td{border:1px solid #222;padding:.4rem .6rem;text-align:left;vertical-align:top}
+th{color:#71717a;font-weight:normal}
+.muted{color:#71717a;font-size:.85rem}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem}
 .card{background:#111;border:1px solid #222;padding:1rem;border-radius:8px;text-align:center}
 .card h2{font-size:.7rem;color:#666;margin:0 0 .75rem;letter-spacing:.15em}
-</style></head><body><h1>glitch effects</h1><div class="grid">` + cards.String() + `</div></body></html>`
+img{max-width:100%}
+</style></head><body>` + docs + `<div class="grid">` + cards.String() + `</div></body></html>`
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(page))
 }
 
+func handleFonts(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(strings.Join(listFonts(), "\n") + "\n"))
+}
+
 func main() {
+	_ = os.MkdirAll(fontsDir, 0755)
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		log.Fatal(err)
 	}
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/render", handleRender)
+	http.HandleFunc("/fonts", handleFonts)
 	addr := ":" + port
 	log.Printf("listening on %s (cache=%s)", addr, cacheDir)
 	log.Fatal(http.ListenAndServe(addr, nil))
