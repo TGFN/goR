@@ -559,7 +559,10 @@ func fxGlitch(base *image.RGBA, n int, rng *rand.Rand) []*image.RGBA {
 	return out
 }
 
-func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg color.RGBA, n int, rng *rand.Rand) []*image.RGBA {
+// typeHoldSec: số giây con trỏ nhấp nháy sau khi gõ xong, trước khi GIF lặp lại.
+const typeHoldSec = 2.0
+
+func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg color.RGBA, n, fps int, rng *rand.Rand) []*image.RGBA {
 	out := make([]*image.RGBA, 0, n)
 	face := getFace(fontName, size)
 	mt := face.Metrics()
@@ -573,13 +576,19 @@ func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg colo
 	cursorTop := int((baseline26 - mt.Ascent) >> 6)
 	cursorBot := int((baseline26 + mt.Descent) >> 6)
 
-	// chia 2 pha: 70% gõ chữ, 30% giữ chữ đầy đủ cho con trỏ nhấp nháy
-	typeFrames := n * 7 / 10
+	// 2 pha: gõ chữ, rồi giữ chữ đầy đủ đúng typeHoldSec giây cho con trỏ nhấp nháy
+	holdFrames := int(typeHoldSec * float64(fps))
+	typeFrames := n - holdFrames
 	if typeFrames < 1 {
 		typeFrames = 1
 	}
 	if typeFrames > n {
 		typeFrames = n
+	}
+	// nửa chu kỳ nhấp nháy ~0.33s, tính theo fps nên luôn đúng thời gian thực
+	half := fps / 3
+	if half < 1 {
+		half = 1
 	}
 
 	for i := 0; i < n; i++ {
@@ -600,7 +609,7 @@ func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg colo
 		} else {
 			// pha 2: chữ đầy đủ, con trỏ nhấp nháy
 			partial = text
-			cursorOn = ((i-typeFrames)/3)%2 == 0
+			cursorOn = ((i-typeFrames)/half)%2 == 0
 		}
 
 		f := makeBase(partial, fontName, w, h, c, size, bg)
@@ -701,7 +710,7 @@ func renderFrames(text, effect, fontName string, w, h int, c1, bgStr string, siz
 		bg = parseHex(bgStr)
 	}
 	if effect == "type" {
-		return fxType(text, fontName, w, h, c, size, bg, n, rng), nil
+		return fxType(text, fontName, w, h, c, size, bg, n, fps, rng), nil
 	}
 	base := makeBase(text, fontName, w, h, c, size, bg)
 	switch effect {
@@ -771,6 +780,11 @@ func handleRender(w http.ResponseWriter, r *http.Request) {
 	fps := clampInt(atoi(q.Get("fps"), 15), 2, 30)
 	dur := math.Min(10, atof(q.Get("dur"), 2.5))
 	n := clampInt(int(float64(fps)*dur), 1, maxFrames)
+	if effect == "type" {
+		// dur = thời gian gõ; cộng thêm typeHoldSec giây con trỏ nhấp nháy
+		hold := int(typeHoldSec * float64(fps))
+		n = clampInt(int(float64(fps)*dur), 1, maxFrames-hold) + hold
+	}
 
 	var seed int64
 	if s := q.Get("seed"); s != "" {
@@ -861,7 +875,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 <tr><td>c1</td><td>ff2e88</td><td>text color, hex without <code>#</code> (or <code>%23</code>)</td></tr>
 <tr><td>bg</td><td>transparent</td><td>background hex color or <code>transparent</code></td></tr>
 <tr><td>fps</td><td>15</td><td>frames per second, 2 to 30</td></tr>
-<tr><td>dur</td><td>2.5</td><td>duration in seconds, max 10 (max ` + strconv.Itoa(maxFrames) + ` frames)</td></tr>
+<tr><td>dur</td><td>2.5</td><td>duration in seconds, max 10 (type: typing time, plus 2s of cursor blinking) (max ` + strconv.Itoa(maxFrames) + ` frames)</td></tr>
 <tr><td>seed</td><td>random</td><td>freezes the noise pattern. Always set it, e.g. <code>seed=7</code>, so the cache is reused</td></tr>
 </table>
 
