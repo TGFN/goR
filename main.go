@@ -859,7 +859,25 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 </section>
 <h1>effects</h1>`
 
-	page := `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>glitch effects</title>
+	page := `<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Glitch Effects</title>
+<meta name="description" content="Generate glitchy text GIFs from a single URL. Works with Discord, GitHub, Markdown.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="glitch">
+<meta property="og:title" content="Glitch Effects">
+<meta property="og:description" content="Generate glitchy text GIFs from a single URL. Works with Discord, GitHub, Markdown.">
+<meta property="og:url" content="https://gor-mez8.onrender.com/">
+<meta property="og:image" content="https://gor-mez8.onrender.com/render.gif?text=GLITCH+EFFECTS&effect=glitch&font=monobold&w=700&h=120&size=72&c1=ff2e88&bg=transparent&fps=15&dur=3&seed=7">
+<meta property="og:image:type" content="image/gif">
+<meta property="og:image:width" content="700">
+<meta property="og:image:height" content="120">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Glitch Effects">
+<meta name="twitter:description" content="Generate glitchy text GIFs from a single URL. Works with Discord, GitHub, Markdown.">
+<meta name="twitter:image" content="https://gor-mez8.onrender.com/render.gif?text=GLITCH+EFFECTS&effect=glitch&font=monobold&w=700&h=120&size=72&c1=ff2e88&bg=transparent&fps=15&dur=3&seed=7">
+<link rel="icon" type="image/gif" href="/render.gif?text=G&effect=glitch&w=32&h=32&size=24&c1=ff2e88&fps=8&dur=1&seed=7">
+<link rel="apple-touch-icon" href="/render.gif?text=G&effect=glitch&w=180&h=180&size=80&c1=ff2e88&fps=8&dur=1&seed=7">
 <style>
 body{background:#0b0b0f;color:#d6d3d1;font-family:ui-monospace,monospace;padding:2rem;max-width:900px;margin:0 auto;line-height:1.5}
 h1{font-size:.8rem;color:#71717a;letter-spacing:.2em;text-transform:uppercase;margin-top:2rem}
