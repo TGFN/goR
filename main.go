@@ -573,14 +573,39 @@ func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg colo
 	cursorTop := int((baseline26 - mt.Ascent) >> 6)
 	cursorBot := int((baseline26 + mt.Descent) >> 6)
 
+	// chia 2 pha: 70% gõ chữ, 30% giữ chữ đầy đủ cho con trỏ nhấp nháy
+	typeFrames := n * 7 / 10
+	if typeFrames < 1 {
+		typeFrames = 1
+	}
+	if typeFrames > n {
+		typeFrames = n
+	}
+
 	for i := 0; i < n; i++ {
-		chars := len(text) * (i + 1) / n
-		if chars < 1 && len(text) > 0 {
-			chars = 1
+		var partial string
+		var cursorOn bool
+
+		if i < typeFrames {
+			// pha 1: gõ chữ
+			chars := len(text) * (i + 1) / typeFrames
+			if chars < 1 && len(text) > 0 {
+				chars = 1
+			}
+			if chars > len(text) {
+				chars = len(text)
+			}
+			partial = text[:chars]
+			cursorOn = (i/2)%2 == 0
+		} else {
+			// pha 2: chữ đầy đủ, con trỏ nhấp nháy
+			partial = text
+			cursorOn = ((i-typeFrames)/3)%2 == 0
 		}
-		partial := text[:chars]
+
 		f := makeBase(partial, fontName, w, h, c, size, bg)
-		if (i/2)%2 == 0 {
+
+		if cursorOn {
 			d := &font.Drawer{Dst: f, Src: image.NewUniform(c), Face: face}
 			meas := d.MeasureString(partial)
 			x := int(((fixed.I(w)-meas)/2 + meas + fixed.I(4)) >> 6)
