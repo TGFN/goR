@@ -803,7 +803,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	var cards strings.Builder
 	for _, e := range effects {
 		cards.WriteString(fmt.Sprintf(
-			`<div class="card"><h2>%s</h2><img src="/render?text=content+has+been+deleted&effect=%s&c1=ff2e88&fps=12&dur=2&size=28&seed=7"></div>`,
+			`<div class="card"><h2>%s</h2><img src="/render.gif?text=content+has+been+deleted&effect=%s&c1=ff2e88&fps=12&dur=2&size=28&seed=7"></div>`,
 			e, e))
 	}
 
@@ -812,7 +812,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		fonts.WriteString(fmt.Sprintf(`<code>%s</code> `, f))
 	}
 
-	example := base + "/render?text=I+miss&effect=glitch&font=bolditalic&w=700&h=130&size=76&c1=d6d3d1&bg=0b0b0d&fps=15&dur=3&seed=7"
+	example := base + "/render.gif?text=I+miss&effect=glitch&font=bolditalic&w=700&h=130&size=76&c1=d6d3d1&bg=0b0b0d&fps=15&dur=3&seed=7"
 	exampleEsc := strings.ReplaceAll(example, "&", "&amp;")
 
 	docs := `<section class="docs">
@@ -820,7 +820,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 <p>Generate glitchy text GIFs from a single URL. Drop it straight into a README or an <code>&lt;img&gt;</code> tag.</p>
 
 <h3>endpoint</h3>
-<pre>GET ` + base + `/render?text=...&amp;effect=...</pre>
+<pre>GET ` + base + `/render.gif?text=...&amp;effect=...   (recommended — works with Discord)</pre>
+<pre>GET ` + base + `/render?text=...&amp;effect=...       (alias, same output)</pre>
 <pre>GET ` + base + `/fonts   (list available fonts)</pre>
 
 <h3>parameters</h3>
@@ -853,6 +854,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 <li>Always set <code>seed</code> so the server doesn't mint a new GIF and write a new cache entry on every load.</li>
 <li>The first render is slower; hit the URL once before embedding it on GitHub.</li>
 <li>On Render's free tier, the server sleeps after ~15 minutes with no traffic.</li>
+<li><b>Discord:</b> use the <code>/render.gif</code> URL (with the <code>.gif</code> extension). Discord sometimes treats extension-less image URLs as static images and only shows the first frame.</li>
 </ul>
 </section>
 <h1>effects</h1>`
@@ -890,6 +892,7 @@ func main() {
 	}
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/render", handleRender)
+	http.HandleFunc("/render.gif", handleRender)
 	http.HandleFunc("/fonts", handleFonts)
 	addr := ":" + port
 	log.Printf("listening on %s (cache=%s)", addr, cacheDir)
