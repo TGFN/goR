@@ -174,6 +174,12 @@ func parseHex(s string) color.RGBA {
 }
 
 func makeBase(text, fontName string, w, h int, c color.RGBA, size float64, bg color.RGBA) *image.RGBA {
+	return makeBaseAt(text, fontName, w, h, c, size, bg, nil)
+}
+
+// makeBaseAt như makeBase nhưng nếu left != nil thì chữ bắt đầu tại x = *left
+// (thay vì căn giữa theo độ rộng của chính chuỗi đó).
+func makeBaseAt(text, fontName string, w, h int, c color.RGBA, size float64, bg color.RGBA, left *int) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	if bg.A > 0 {
 		for i := 0; i < len(img.Pix); i += 4 {
@@ -205,6 +211,9 @@ func makeBase(text, fontName string, w, h int, c color.RGBA, size float64, bg co
 
 	// căn giữa ngang, căn giữa dọc
 	dx := (w - tw) / 2
+	if left != nil {
+		dx = *left
+	}
 	dy := h/2 - th/2
 
 	for y := 0; y < th; y++ {
@@ -588,13 +597,21 @@ func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg colo
 	cursorTop := int((baseline26 - mt.Ascent) >> 6)
 	cursorBot := int((baseline26 + mt.Descent) >> 6)
 
+	// Bố cục neo theo chuỗi ĐẦY ĐỦ: (chữ + trỏ) căn giữa khung, chữ gõ từ điểm trái cố định.
+	// Nhờ vậy chữ không bị xê dịch khi gõ và trỏ ở frame cuối không bị tràn ra ngoài khung.
+	fd := &font.Drawer{Face: face}
+	fullW := int(fd.MeasureString(text) >> 6)
+	gap := 4
+	left := (w - (fullW + gap + cw)) / 2
+	if fullW+gap+cw > w {
+		left = w - (fullW + gap + cw) // chuỗi quá dài: canh phải để trỏ vẫn thấy
+	}
+
 	// vẽ 1 frame: chữ đã gõ + (tuỳ chọn) con trỏ
 	draw := func(partial string, cursorOn bool) *image.RGBA {
-		f := makeBase(partial, fontName, w, h, c, size, bg)
+		f := makeBaseAt(partial, fontName, w, h, c, size, bg, &left)
 		if cursorOn {
-			d := &font.Drawer{Dst: f, Src: image.NewUniform(c), Face: face}
-			meas := d.MeasureString(partial)
-			x := int(((fixed.I(w)-meas)/2 + meas + fixed.I(4)) >> 6)
+			x := left + int(fd.MeasureString(partial)>>6) + gap
 			for yy := cursorTop; yy < cursorBot; yy++ {
 				for xx := x; xx < x+cw; xx++ {
 					if xx >= 0 && xx < w && yy >= 0 && yy < h {
@@ -614,15 +631,16 @@ func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg colo
 	out := make([]*image.RGBA, 0, typeFrames+holdFrames)
 
 	// pha 1: gõ chữ (chỉ phụ thuộc typeFrames)
+	runes := []rune(text) // cắt theo rune, không cắt giữa ký tự UTF-8 (tiếng Việt có dấu)
 	for i := 0; i < typeFrames; i++ {
-		chars := len(text) * (i + 1) / typeFrames
-		if chars < 1 && len(text) > 0 {
+		chars := len(runes) * (i + 1) / typeFrames
+		if chars < 1 && len(runes) > 0 {
 			chars = 1
 		}
-		if chars > len(text) {
-			chars = len(text)
+		if chars > len(runes) {
+			chars = len(runes)
 		}
-		out = append(out, draw(text[:chars], (i/2)%2 == 0))
+		out = append(out, draw(string(runes[:chars]), (i/2)%2 == 0))
 	}
 
 	// pha 2: giữ chữ đầy đủ, trỏ nhấp nháy (chỉ phụ thuộc holdFrames); bắt đầu bằng trỏ sáng
@@ -795,7 +813,7 @@ func handleRender(w http.ResponseWriter, r *http.Request) {
 		seed = rand.Int63()
 	}
 
-	key := cacheKey(fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%.2f|%d|%d|%d",
+	key := cacheKey(fmt.Sprintf("v2|%s|%s|%s|%d|%d|%s|%s|%.2f|%d|%d|%d",
 		text, effect, fontName, width, height, c1, bg, size, fps, n, seed))
 	cf := filepath.Join(cacheDir, key+".gif")
 
