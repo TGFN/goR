@@ -17,12 +17,18 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # ---------- runtime stage ----------
 FROM alpine:3.20
 
+# Bỏ font-noto-emoji (chỉ có bitmap — Go không render được)
+# Cài wget để tải NotoEmoji-Regular.ttf (outline — Go render được)
 RUN apk add --no-cache \
     ca-certificates \
     tzdata \
     fontconfig \
     ttf-dejavu \
-    font-noto-emoji
+    wget \
+ && mkdir -p /usr/share/fonts/noto \
+ && wget -qO /usr/share/fonts/noto/NotoEmoji-Regular.ttf \
+      https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoEmoji-Regular.ttf \
+ && fc-cache -f
 
 WORKDIR /app
 
