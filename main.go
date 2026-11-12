@@ -361,7 +361,19 @@ func makeBase(text, fontName string, w, h int, c color.RGBA, size float64, bg co
 	}
 
 	tmp := image.NewRGBA(image.Rect(0, 0, tw, th))
-	drawTextWithEmoji(tmp, text, 0, mt.Ascent, c, face, em)
+	if em != nil {
+		// nếu có font emoji: chỉ vẽ chữ (emoji sẽ overlay sau effect)
+		plainText, emojis := splitTextEmoji(text, face, em)
+		if len(emojis) > 0 {
+			d := &font.Drawer{Dst: tmp, Src: image.NewUniform(c), Face: face}
+			d.Dot = fixed.Point26_6{X: 0, Y: mt.Ascent}
+			d.DrawString(plainText)
+		} else {
+			drawTextWithEmoji(tmp, text, 0, mt.Ascent, c, face, em)
+		}
+	} else {
+		drawTextWithEmoji(tmp, text, 0, mt.Ascent, c, face, em)
+	}
 
 	// căn giữa ngang, căn giữa dọc
 	dx := (w - tw) / 2
@@ -1063,6 +1075,65 @@ func fxZoom(base *image.RGBA, n int, rng *rand.Rand) []*image.RGBA {
 	return out
 }
 
+// splitTextEmoji chia text thành chữ + vị trí emoji.
+// Trả về: string chỉ chữ (emoji thay bằng space) và slice emoji (rune, offset).
+type emojiPos struct {
+	r     rune
+	xOff  fixed.Int26_6
+	width fixed.Int26_6
+}
+
+func splitTextEmoji(text string, face, emoji font.Face) (string, []emojiPos) {
+	var plain strings.Builder
+	var emojis []emojiPos
+	var total fixed.Int26_6
+	for _, r := range text {
+		isEm := isEmojiRune(r) && emoji != nil && fontHasRune(emoji, r)
+		if isEm {
+			w, _ := emoji.GlyphAdvance(r)
+			emojis = append(emojis, emojiPos{r, total, w})
+			plain.WriteRune(' ')
+			total += w
+			continue
+		}
+		w, _ := face.GlyphAdvance(r)
+		plain.WriteRune(r)
+		total += w
+	}
+	return plain.String(), emojis
+}
+
+// overlayEmoji vẽ emoji lên frame (sau effect) tại đúng vị trí.
+func overlayEmoji(dst *image.RGBA, text string, face, emoji font.Face, c color.RGBA, x0, baseline fixed.Int26_6) {
+	if emoji == nil {
+		return
+	}
+	_, emojis := splitTextEmoji(text, face, emoji)
+	if len(emojis) == 0 {
+		return
+	}
+	var totalW fixed.Int26_6
+	for _, r := range text {
+		if isEmojiRune(r) && emoji != nil && fontHasRune(emoji, r) {
+			w, _ := emoji.GlyphAdvance(r)
+			totalW += w
+		} else {
+			w, _ := face.GlyphAdvance(r)
+			totalW += w
+		}
+	}
+	start := x0 - totalW/2
+
+	emojiDrawer := &font.Drawer{Dst: dst, Src: image.NewUniform(c), Face: emoji}
+	for _, e := range emojis {
+		emojiDrawer.Dot = fixed.Point26_6{
+			X: start + e.xOff,
+			Y: baseline,
+		}
+		emojiDrawer.DrawString(string(e.r))
+	}
+}
+
 // ---------- GIF encode ----------
 
 // buildPalette trả về palette 256 màu, index 0 trong suốt + 216 web-safe.
@@ -1141,44 +1212,73 @@ func renderFrames(text, effect, fontName string, w, h int, c1, bgStr string, siz
 		bg = parseHex(bgStr)
 	}
 	if effect == "type" {
+		// fxType vẽ emoji per-frame trong makeBase, không overlay
 		return fxType(text, fontName, w, h, c, size, bg, n, fps, rng), nil
 	}
-	base := makeBase(text, fontName, w, h, c, size, bg)
+
+	// tách text: chữ vẽ vào base, emoji overlay sau effect
+	face := getFace(fontName, size)
+	em := emojiFace(size)
+	_, emojis := splitTextEmoji(text, face, em)
+	hasEmoji := em != nil && len(emojis) > 0
+
+	var base *image.RGBA
+	if hasEmoji {
+		// base chỉ có chữ, emoji thay bằng space placeholder
+		plainText, _ := splitTextEmoji(text, face, em)
+		base = makeBase(plainText, fontName, w, h, c, size, bg)
+	} else {
+		base = makeBase(text, fontName, w, h, c, size, bg)
+	}
+
+	var frames []*image.RGBA
 	switch effect {
 	case "vhs":
-		return fxVHS(base, n, rng), nil
+		frames = fxVHS(base, n, rng)
 	case "static":
-		return fxStatic(base, n, rng), nil
+		frames = fxStatic(base, n, rng)
 	case "dropout":
-		return fxDropout(base, n, rng), nil
+		frames = fxDropout(base, n, rng)
 	case "rgb":
-		return fxRGB(base, n, rng), nil
+		frames = fxRGB(base, n, rng)
 	case "flicker":
-		return fxFlicker(base, n, rng), nil
+		frames = fxFlicker(base, n, rng)
 	case "ghost":
-		return fxGhost(base, n, rng), nil
+		frames = fxGhost(base, n, rng)
 	case "roll":
-		return fxRoll(base, n, rng), nil
+		frames = fxRoll(base, n, rng)
 	case "glitch":
-		return fxGlitch(base, n, rng), nil
+		frames = fxGlitch(base, n, rng)
 	case "scan":
-		return fxScan(base, n, rng), nil
+		frames = fxScan(base, n, rng)
 	case "wave":
-		return fxWave(base, n, rng), nil
+		frames = fxWave(base, n, rng)
 	case "slice":
-		return fxSlice(base, n, rng), nil
+		frames = fxSlice(base, n, rng)
 	case "invert":
-		return fxInvert(base, n, rng), nil
+		frames = fxInvert(base, n, rng)
 	case "pixelate":
-		return fxPixelate(base, n, rng), nil
+		frames = fxPixelate(base, n, rng)
 	case "bloom":
-		return fxBloom(base, n, rng), nil
+		frames = fxBloom(base, n, rng)
 	case "shake":
-		return fxShake(base, n, rng), nil
+		frames = fxShake(base, n, rng)
 	case "zoom":
-		return fxZoom(base, n, rng), nil
+		frames = fxZoom(base, n, rng)
+	default:
+		return nil, fmt.Errorf("unknown effect: %s", effect)
 	}
-	return nil, fmt.Errorf("unknown effect: %s", effect)
+
+	// overlay emoji sắc nét lên từng frame (sau effect)
+	if hasEmoji {
+		mt := face.Metrics()
+		baseline := fixed.I(h)/2 + (mt.Ascent-mt.Descent)/2
+		for _, f := range frames {
+			overlayEmoji(f, text, face, em, c, fixed.I(w)/2, baseline)
+		}
+	}
+
+	return frames, nil
 }
 
 // ---------- HTTP ----------
