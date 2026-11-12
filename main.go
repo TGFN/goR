@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/gif"
+	"io"
 	"log"
 	"math"
 	"math/rand"
@@ -19,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gobold"
@@ -408,6 +410,109 @@ func measureTextWithEmoji(text string, face font.Face, emoji font.Face) fixed.In
 		total += w
 	}
 	return total
+}
+
+// ensureEmojiFont kiểm tra toàn hệ thống xem có font emoji outline chưa.
+// Nếu chưa, tự tải từ mirror CTAN và lưu vào fontsDir.
+func ensureEmojiFont() {
+// 1. quét TOÀN BỘ path (giống loadEmojiFont)
+all := scanEmojiFonts()
+all = append(all,
+"/usr/share/fonts/noto/NotoEmoji-Regular.ttf",
+"/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",
+"/usr/share/fonts/truetype/symbola/Symbola.ttf",
+"/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf",
+)
+
+// khử trùng
+seen := map[string]bool{}
+uniq := all[:0]
+for _, c := range all {
+if c == "" || seen[c] {
+continue
+}
+seen[c] = true
+uniq = append(uniq, c)
+}
+all = uniq
+
+// 2. kiểm tra từng path
+for _, path := range all {
+data, err := os.ReadFile(path)
+if err != nil {
+continue
+}
+f, err := opentype.Parse(data)
+if err != nil {
+continue
+}
+if isOutlineEmojiFace(f) {
+log.Printf("emoji font present: %s", path)
+return
+}
+}
+
+// 3. chưa có → tải
+mirrors := []string{
+"https://mirrors.ctan.org/fonts/noto-emoji/NotoEmoji-Regular.ttf",
+"https://raw.githubusercontent.com/notofonts/notofonts.github.io/main/fonts/NotoEmoji/unhinted/ttf/NotoEmoji-Regular.ttf",
+}
+dest := filepath.Join(fontsDir, "NotoEmoji-Regular.ttf")
+
+for _, url := range mirrors {
+log.Printf("downloading emoji font: %s", url)
+if err := downloadFile(url, dest); err != nil {
+log.Printf("download failed (%v), trying next mirror", err)
+continue
+}
+data, err := os.ReadFile(dest)
+if err != nil {
+log.Printf("read downloaded file failed: %v", err)
+os.Remove(dest)
+continue
+}
+f, err := opentype.Parse(data)
+if err != nil {
+log.Printf("parse downloaded font failed: %v", err)
+os.Remove(dest)
+continue
+}
+if !isOutlineEmojiFace(f) {
+log.Printf("downloaded font is bitmap, not usable — removing")
+os.Remove(dest)
+continue
+}
+log.Printf("emoji font installed: %s", dest)
+return
+}
+log.Printf("could not download emoji font — emojis will not render")
+}
+
+func downloadFile(url, dest string) error {
+client := &http.Client{Timeout: 30 * time.Second}
+resp, err := client.Get(url)
+if err != nil {
+return err
+}
+defer resp.Body.Close()
+if resp.StatusCode != http.StatusOK {
+return fmt.Errorf("http %d", resp.StatusCode)
+}
+tmp := dest + ".tmp"
+out, err := os.Create(tmp)
+if err != nil {
+return err
+}
+if _, err := io.Copy(out, resp.Body); err != nil {
+out.Close()
+os.Remove(tmp)
+return err
+}
+if err := out.Close(); err != nil {
+os.Remove(tmp)
+return err
+}
+return os.Rename(tmp, dest)
 }
 
 // ---------- color / font ----------
@@ -1598,6 +1703,8 @@ func main() {
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		log.Fatal(err)
 	}
+	// tự tải font emoji nếu chưa có ở đâu
+	ensureEmojiFont()
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/render", handleRender)
 	http.HandleFunc("/render.gif", handleRender)
