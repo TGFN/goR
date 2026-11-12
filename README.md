@@ -119,7 +119,7 @@ The API provides seventeen built-in effects.
 <p align="center">
   <b>TYPE</b>
   <br/>
-  <img src="https://gor-mez8.onrender.com/render.gif?text=HELLO+WORLD&effect=type&font=monobold&w=520&h=100&size=55&c1=ff2e88&bg=transparent&fps=15&dur=3&seed=7" alt="Type effect"/>
+  <img src="https://gor-mez8.onrender.com/render?text=HELLO+WORLD&effect=type&font=monobold&w=520&h=100&size=55&c1=ff2e88&bg=transparent&fps=15&dur=3&seed=7" alt="Type effect"/>
 </p>
 
 <p align="center">
