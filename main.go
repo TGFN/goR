@@ -157,6 +157,166 @@ func getFace(name string, size float64) font.Face {
 	return f
 }
 
+// ---------- emoji fallback ----------
+
+// danh sách đường dẫn font emoji phổ biến trên các hệ điều hành
+var emojiFontPaths = []string{
+	"/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+	"/usr/share/fonts/truetype/noto-emoji/NotoColorEmoji.ttf",
+	"/usr/share/fonts/noto/NotoColorEmoji.ttf",
+	"/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+	"/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf",
+	"/System/Library/Fonts/Apple Color Emoji.ttc",
+	"/System/Library/Fonts/AppleColorEmoji.ttc",
+	"/Library/Fonts/Apple Color Emoji.ttc",
+	"/mnt/c/Windows/Fonts/seguiemj.ttf",
+	"C:\\Windows\\Fonts\\seguiemj.ttf",
+	"/data/data/com.termux/files/usr/share/fonts/TTF/NotoColorEmoji.ttf",
+	"/data/data/com.termux/files/usr/share/fonts/noto/NotoColorEmoji.ttf",
+}
+
+var (
+	emojiFaceOnce sync.Once
+	emojiFaceCache font.Face
+	emojiParsed   *opentype.Font
+)
+
+// loadEmojiFont thử parse font emoji đầu tiên có sẵn. Trả về nil nếu không có.
+func loadEmojiFont() {
+	// cho phép override qua env
+	if p := os.Getenv("EMOJI_FONT"); p != "" {
+		emojiFontPaths = append([]string{p}, emojiFontPaths...)
+	}
+	// cũng thử trong fontsDir
+	if ents, err := os.ReadDir(fontsDir); err == nil {
+		for _, e := range ents {
+			n := strings.ToLower(e.Name())
+			if strings.Contains(n, "emoji") && (strings.HasSuffix(n, ".ttf") || strings.HasSuffix(n, ".otf")) {
+				emojiFontPaths = append([]string{filepath.Join(fontsDir, e.Name())}, emojiFontPaths...)
+			}
+		}
+	}
+	for _, path := range emojiFontPaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		f, err := opentype.Parse(data)
+		if err != nil {
+			continue
+		}
+		emojiParsed = f
+		log.Printf("emoji font loaded: %s", path)
+		return
+	}
+	log.Printf("no emoji font found — emojis will render as boxes")
+}
+
+// emojiFace trả về face emoji ở kích thước cho trước, hoặc nil.
+func emojiFace(size float64) font.Face {
+	emojiFaceOnce.Do(loadEmojiFont)
+	if emojiParsed == nil {
+		return nil
+	}
+	faceMu.Lock()
+	defer faceMu.Unlock()
+	k := faceKey{"__emoji__", size}
+	if f, ok := faceMap[k]; ok {
+		return f
+	}
+	// font emoji thường có sẵn ở size cố định (Noto Color Emoji chỉ 109px)
+	// thử size yêu cầu trước, fallback 109 nếu lỗi
+	for _, sz := range []float64{size, 109, 96, 64, 48, 32, 24, 16} {
+		f, err := opentype.NewFace(emojiParsed, &opentype.FaceOptions{
+			Size: sz, DPI: 72, Hinting: font.HintingNone,
+		})
+		if err == nil {
+			faceMap[k] = f
+			return f
+		}
+	}
+	return nil
+}
+
+// isEmojiRune trả về true nếu rune nằm trong vùng emoji Unicode.
+func isEmojiRune(r rune) bool {
+	switch {
+	case r >= 0x1F300 && r <= 0x1FAFF: // emoji chính
+		return true
+	case r >= 0x2600 && r <= 0x27BF: // misc symbols + dingbats
+		return true
+	case r >= 0x1F000 && r <= 0x1F02F: // mahjong
+		return true
+	case r >= 0x1F0A0 && r <= 0x1F0FF: // playing cards
+		return true
+	case r >= 0x1F100 && r <= 0x1F1FF: // enclosed alphanumeric + flags
+		return true
+	case r >= 0x1F200 && r <= 0x1F2FF: // enclosed ideographic
+		return true
+	case r == 0x200D: // zero width joiner
+		return true
+	case r == 0xFE0F: // variation selector
+		return true
+	case r >= 0x1F3FB && r <= 0x1F3FF: // skin tone modifiers
+		return true
+	}
+	return false
+}
+
+// fontHasRune kiểm tra face có glyph cho rune không.
+func fontHasRune(f font.Face, r rune) bool {
+	if f == nil {
+		return false
+	}
+	_, ok := f.GlyphAdvance(r)
+	return ok
+}
+
+// drawTextWithEmoji vẽ text, tự động fallback sang font emoji khi cần.
+func drawTextWithEmoji(dst *image.RGBA, text string, x, baseline fixed.Int26_6, c color.RGBA, face font.Face, emoji font.Face) {
+	drawer := &font.Drawer{Dst: dst, Src: image.NewUniform(c), Face: face}
+	drawer.Dot = fixed.Point26_6{X: x, Y: baseline}
+
+	emojiDrawer := &font.Drawer{Dst: dst, Src: image.NewUniform(c), Face: emoji}
+
+	for _, r := range text {
+		if fontHasRune(face, r) && !isEmojiRune(r) {
+			drawer.DrawString(string(r))
+			continue
+		}
+		// thử emoji
+		if emoji != nil && fontHasRune(emoji, r) {
+			emojiDrawer.Dot = fixed.Point26_6{X: drawer.Dot.X, Y: baseline}
+			emojiDrawer.DrawString(string(r))
+			adv, _ := emoji.GlyphAdvance(r)
+			drawer.Dot.X += adv
+			continue
+		}
+		// không có font nào → vẽ bằng font chính (sẽ ra box)
+		drawer.DrawString(string(r))
+	}
+}
+
+// measureTextWithEmoji đo width tổng của text với fallback emoji.
+func measureTextWithEmoji(text string, face font.Face, emoji font.Face) fixed.Int26_6 {
+	var total fixed.Int26_6
+	for _, r := range text {
+		if fontHasRune(face, r) && !isEmojiRune(r) {
+			w, _ := face.GlyphAdvance(r)
+			total += w
+			continue
+		}
+		if emoji != nil && fontHasRune(emoji, r) {
+			w, _ := emoji.GlyphAdvance(r)
+			total += w
+			continue
+		}
+		w, _ := face.GlyphAdvance(r)
+		total += w
+	}
+	return total
+}
+
 // ---------- color / font ----------
 
 func parseHex(s string) color.RGBA {
@@ -184,9 +344,11 @@ func makeBase(text, fontName string, w, h int, c color.RGBA, size float64, bg co
 		return img
 	}
 	face := getFace(fontName, size)
-	d := &font.Drawer{Src: image.NewUniform(c), Face: face}
-	m := d.MeasureString(text)
+	em := emojiFace(size)
 	mt := face.Metrics()
+
+	// đo bằng fallback để width chính xác khi có emoji
+	m := measureTextWithEmoji(text, face, em)
 
 	// canvas tạm vừa khít glyph — Drawer không thể vẽ tràn
 	tw := int(m >> 6)
@@ -199,9 +361,7 @@ func makeBase(text, fontName string, w, h int, c color.RGBA, size float64, bg co
 	}
 
 	tmp := image.NewRGBA(image.Rect(0, 0, tw, th))
-	d.Dst = tmp
-	d.Dot = fixed.Point26_6{X: 0, Y: mt.Ascent}
-	d.DrawString(text)
+	drawTextWithEmoji(tmp, text, 0, mt.Ascent, c, face, em)
 
 	// căn giữa ngang, căn giữa dọc
 	dx := (w - tw) / 2
@@ -592,8 +752,8 @@ func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg colo
 	draw := func(partial string, cursorOn bool) *image.RGBA {
 		f := makeBase(partial, fontName, w, h, c, size, bg)
 		if cursorOn {
-			d := &font.Drawer{Dst: f, Src: image.NewUniform(c), Face: face}
-			meas := d.MeasureString(partial)
+			em := emojiFace(size)
+			meas := measureTextWithEmoji(partial, face, em)
 			x := int(((fixed.I(w)-meas)/2 + meas + fixed.I(4)) >> 6)
 			for yy := cursorTop; yy < cursorBot; yy++ {
 				for xx := x; xx < x+cw; xx++ {
@@ -1178,6 +1338,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 <li>Always set <code>seed</code> so the server doesn't mint a new GIF and write a new cache entry on every load.</li>
 <li>The first render is slower; hit the URL once before embedding it on GitHub.</li>
 <li>On Render's free tier, the server sleeps after ~15 minutes with no traffic.</li>
+<li><b>Emoji:</b> emoji in <code>text</code> render via the system emoji font when available (Noto Color Emoji, Apple Color Emoji, Segoe UI Emoji). In Docker, install <code>fonts-noto-color-emoji</code>.</li>
 <li><b>Discord:</b> use the <code>/render.gif</code> URL (with the <code>.gif</code> extension). Discord sometimes treats extension-less image URLs as static images and only shows the first frame.</li>
 </ul>
 </section>
