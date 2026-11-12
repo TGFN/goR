@@ -844,9 +844,12 @@ func typeTotalFrames(fps int, dur float64) int {
 func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg color.RGBA, n, fps int, rng *rand.Rand) []*image.RGBA {
 	face := getFace(fontName, size)
 	mt := face.Metrics()
-	cw := int(size) / 3
-	if cw < 4 {
-		cw = 4
+	cw := int(size) / 8
+	if cw < 3 {
+		cw = 3
+	}
+	if cw > 10 {
+		cw = 10
 	}
 	// baseline giữ ở đơn vị 26.6 để chính xác, đổi về int ngay khi dùng
 	baseline26 := fixed.I(h)/2 + (mt.Ascent-mt.Descent)/2
@@ -878,16 +881,18 @@ func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg colo
 	}
 	out := make([]*image.RGBA, 0, typeFrames+holdFrames)
 
-	// pha 1: gõ chữ (chỉ phụ thuộc typeFrames)
+	// pha 1: gõ chữ — cắt theo RUNE, không theo byte (emoji 3-4 byte)
+	runes := []rune(text)
+	totalRunes := len(runes)
 	for i := 0; i < typeFrames; i++ {
-		chars := len(text) * (i + 1) / typeFrames
-		if chars < 1 && len(text) > 0 {
+		chars := totalRunes * (i + 1) / typeFrames
+		if chars < 1 && totalRunes > 0 {
 			chars = 1
 		}
-		if chars > len(text) {
-			chars = len(text)
+		if chars > totalRunes {
+			chars = totalRunes
 		}
-		out = append(out, draw(text[:chars], (i/2)%2 == 0))
+		out = append(out, draw(string(runes[:chars]), (i/2)%2 == 0))
 	}
 
 	// pha 2: giữ chữ đầy đủ, trỏ nhấp nháy (chỉ phụ thuộc holdFrames); bắt đầu bằng trỏ sáng
