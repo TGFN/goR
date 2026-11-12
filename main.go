@@ -842,68 +842,75 @@ func typeTotalFrames(fps int, dur float64) int {
 // fxType ghép 2 pha riêng biệt: gõ chữ, rồi giữ chữ đầy đủ cho trỏ nhấp nháy.
 // n là tổng frame (typeTotalFrames); pha giữ luôn đúng typeHoldFrames(fps).
 func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg color.RGBA, n, fps int, rng *rand.Rand) []*image.RGBA {
-	face := getFace(fontName, size)
-	mt := face.Metrics()
-	cw := int(size) / 8
-	if cw < 3 {
-		cw = 3
-	}
-	if cw > 10 {
-		cw = 10
-	}
-	// baseline giữ ở đơn vị 26.6 để chính xác, đổi về int ngay khi dùng
-	baseline26 := fixed.I(h)/2 + (mt.Ascent-mt.Descent)/2
-	cursorTop := int((baseline26 - mt.Ascent) >> 6)
-	cursorBot := int((baseline26 + mt.Descent) >> 6)
+face := getFace(fontName, size)
+em := emojiFace(size)
+mt := face.Metrics()
+cw := int(size) / 8
+if cw < 3 {
+cw = 3
+}
+if cw > 10 {
+cw = 10
+}
+// baseline giữ ở đơn vị 26.6 để chính xác, đổi về int ngay khi dùng
+baseline26 := fixed.I(h)/2 + (mt.Ascent-mt.Descent)/2
+cursorTop := int((baseline26 - mt.Ascent) >> 6)
+cursorBot := int((baseline26 + mt.Descent) >> 6)
+// baseline cho overlayEmoji (cùng công thức)
+emojiBaseline := baseline26
 
-	// vẽ 1 frame: chữ đã gõ + (tuỳ chọn) con trỏ
-	draw := func(partial string, cursorOn bool) *image.RGBA {
-		f := makeBase(partial, fontName, w, h, c, size, bg)
-		if cursorOn {
-			em := emojiFace(size)
-			meas := measureTextWithEmoji(partial, face, em)
-			x := int(((fixed.I(w)-meas)/2 + meas + fixed.I(4)) >> 6)
-			for yy := cursorTop; yy < cursorBot; yy++ {
-				for xx := x; xx < x+cw; xx++ {
-					if xx >= 0 && xx < w && yy >= 0 && yy < h {
-						f.SetRGBA(xx, yy, c)
-					}
-				}
-			}
-		}
-		return addNoise(f, 0.05, 0.3, rng)
-	}
+// vẽ 1 frame: chữ đã gõ + emoji overlay + (tuỳ chọn) con trỏ
+draw := func(partial string, cursorOn bool) *image.RGBA {
+f := makeBase(partial, fontName, w, h, c, size, bg)
+// overlay emoji lên frame (makeBase chỉ vẽ chữ)
+if em != nil {
+overlayEmoji(f, partial, face, em, c, fixed.I(w)/2, emojiBaseline)
+}
+if cursorOn {
+// đo width bao gồm cả emoji để đặt cursor đúng
+meas := measureTextWithEmoji(partial, face, em)
+x := int(((fixed.I(w)-meas)/2 + meas + fixed.I(4)) >> 6)
+for yy := cursorTop; yy < cursorBot; yy++ {
+for xx := x; xx < x+cw; xx++ {
+if xx >= 0 && xx < w && yy >= 0 && yy < h {
+f.SetRGBA(xx, yy, c)
+}
+}
+}
+}
+return addNoise(f, 0.05, 0.3, rng)
+}
 
-	holdFrames := typeHoldFrames(fps)
-	typeFrames := n - holdFrames
-	if typeFrames < 1 {
-		typeFrames = 1
-	}
-	out := make([]*image.RGBA, 0, typeFrames+holdFrames)
+holdFrames := typeHoldFrames(fps)
+typeFrames := n - holdFrames
+if typeFrames < 1 {
+typeFrames = 1
+}
+out := make([]*image.RGBA, 0, typeFrames+holdFrames)
 
-	// pha 1: gõ chữ — cắt theo RUNE, không theo byte (emoji 3-4 byte)
-	runes := []rune(text)
-	totalRunes := len(runes)
-	for i := 0; i < typeFrames; i++ {
-		chars := totalRunes * (i + 1) / typeFrames
-		if chars < 1 && totalRunes > 0 {
-			chars = 1
-		}
-		if chars > totalRunes {
-			chars = totalRunes
-		}
-		out = append(out, draw(string(runes[:chars]), (i/2)%2 == 0))
-	}
+// pha 1: gõ chữ — cắt theo RUNE
+runes := []rune(text)
+totalRunes := len(runes)
+for i := 0; i < typeFrames; i++ {
+chars := totalRunes * (i + 1) / typeFrames
+if chars < 1 && totalRunes > 0 {
+chars = 1
+}
+if chars > totalRunes {
+chars = totalRunes
+}
+out = append(out, draw(string(runes[:chars]), (i/2)%2 == 0))
+}
 
-	// pha 2: giữ chữ đầy đủ, trỏ nhấp nháy (chỉ phụ thuộc holdFrames); bắt đầu bằng trỏ sáng
-	half := fps / 3 // nửa chu kỳ ~0.33s
-	if half < 1 {
-		half = 1
-	}
-	for i := 0; i < holdFrames; i++ {
-		out = append(out, draw(text, (i/half)%2 == 0))
-	}
-	return out
+// pha 2: giữ chữ đầy đủ, trỏ nhấp nháy
+half := fps / 3
+if half < 1 {
+half = 1
+}
+for i := 0; i < holdFrames; i++ {
+out = append(out, draw(text, (i/half)%2 == 0))
+}
+return out
 }
 
 // ---------- additional effects ----------
