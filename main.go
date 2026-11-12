@@ -181,22 +181,111 @@ var (
 	emojiParsed   *opentype.Font
 )
 
-// loadEmojiFont thử parse font emoji đầu tiên có sẵn. Trả về nil nếu không có.
-func loadEmojiFont() {
-	// cho phép override qua env
-	if p := os.Getenv("EMOJI_FONT"); p != "" {
-		emojiFontPaths = append([]string{p}, emojiFontPaths...)
+// scanEmojiFonts quét toàn bộ thư mục font hệ thống + fontsDir,
+// trả về danh sách path của mọi file font có tên chứa "emoji".
+func scanEmojiFonts() []string {
+	roots := []string{
+		"/usr/share/fonts",
+		"/usr/local/share/fonts",
+		"/usr/share/fonts/truetype",
+		"/System/Library/Fonts",
+		"/Library/Fonts",
+		"~/.fonts",
+		"~/.local/share/fonts",
+		"/data/data/com.termux/files/usr/share/fonts",
+		"/data/data/com.termux/files/home/.termux/fonts",
+		"/data/data/com.termux/files/home/.fonts",
+		fontsDir,
 	}
-	// cũng thử trong fontsDir
-	if ents, err := os.ReadDir(fontsDir); err == nil {
-		for _, e := range ents {
-			n := strings.ToLower(e.Name())
-			if strings.Contains(n, "emoji") && (strings.HasSuffix(n, ".ttf") || strings.HasSuffix(n, ".otf")) {
-				emojiFontPaths = append([]string{filepath.Join(fontsDir, e.Name())}, emojiFontPaths...)
+
+	var out []string
+	seen := map[string]bool{}
+	for _, root := range roots {
+		// mở rộng ~ thành home
+		if strings.HasPrefix(root, "~/") {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				continue
 			}
+			root = filepath.Join(home, root[2:])
+		}
+		filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				return nil
+			}
+			name := strings.ToLower(d.Name())
+			ext := filepath.Ext(name)
+			if ext != ".ttf" && ext != ".otf" && ext != ".ttc" {
+				return nil
+			}
+			if !strings.Contains(name, "emoji") && !strings.Contains(name, "symbola") {
+				return nil
+			}
+			if !seen[path] {
+				seen[path] = true
+				out = append(out, path)
+			}
+			return nil
+		})
+	}
+	return out
+}
+
+// isOutlineEmojiFace trả về true nếu face render được outline emoji (không phải bitmap).
+func isOutlineEmojiFace(f *opentype.Font) bool {
+	testFace, err := opentype.NewFace(f, &opentype.FaceOptions{
+		Size: 32, DPI: 72, Hinting: font.HintingNone,
+	})
+	if err != nil {
+		return false
+	}
+	// thử vài emoji phổ biến — tất cả phải có glyph
+	for _, r := range []rune{0x1F30D, 0x1F600, 0x2764, 0x1F680} {
+		if _, ok := testFace.GlyphAdvance(r); !ok {
+			return false
 		}
 	}
-	for _, path := range emojiFontPaths {
+	return true
+}
+
+// loadEmojiFont quét mọi font emoji trong hệ thống, chọn font outline đầu tiên.
+func loadEmojiFont() {
+	var candidates []string
+
+	// 1. env override (ưu tiên tuyệt đối)
+	if p := os.Getenv("EMOJI_FONT"); p != "" {
+		candidates = append(candidates, p)
+	}
+
+	// 2. scan toàn hệ thống
+	candidates = append(candidates, scanEmojiFonts()...)
+
+	// 3. fallback path cứng phòng khi scan miss
+	candidates = append(candidates,
+		"/usr/share/fonts/noto/NotoEmoji-Regular.ttf",
+		"/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",
+		"/usr/share/fonts/truetype/symbola/Symbola.ttf",
+		"/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf",
+	)
+
+	// khử trùng
+	seen := map[string]bool{}
+	uniq := candidates[:0]
+	for _, c := range candidates {
+		if c == "" || seen[c] {
+			continue
+		}
+		seen[c] = true
+		uniq = append(uniq, c)
+	}
+	candidates = uniq
+
+	log.Printf("scanning %d emoji font candidates", len(candidates))
+
+	for _, path := range candidates {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -205,11 +294,15 @@ func loadEmojiFont() {
 		if err != nil {
 			continue
 		}
+		if !isOutlineEmojiFace(f) {
+			log.Printf("skip (bitmap/no outline): %s", path)
+			continue
+		}
 		emojiParsed = f
 		log.Printf("emoji font loaded: %s", path)
 		return
 	}
-	log.Printf("no emoji font found — emojis will render as boxes")
+	log.Printf("no outline emoji font found — emojis will render as boxes")
 }
 
 // emojiFace trả về face emoji ở kích thước cho trước, hoặc nil.
