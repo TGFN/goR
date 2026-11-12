@@ -174,12 +174,6 @@ func parseHex(s string) color.RGBA {
 }
 
 func makeBase(text, fontName string, w, h int, c color.RGBA, size float64, bg color.RGBA) *image.RGBA {
-	return makeBaseAt(text, fontName, w, h, c, size, bg, nil)
-}
-
-// makeBaseAt như makeBase nhưng nếu left != nil thì chữ bắt đầu tại x = *left
-// (thay vì căn giữa theo độ rộng của chính chuỗi đó).
-func makeBaseAt(text, fontName string, w, h int, c color.RGBA, size float64, bg color.RGBA, left *int) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	if bg.A > 0 {
 		for i := 0; i < len(img.Pix); i += 4 {
@@ -211,9 +205,6 @@ func makeBaseAt(text, fontName string, w, h int, c color.RGBA, size float64, bg 
 
 	// căn giữa ngang, căn giữa dọc
 	dx := (w - tw) / 2
-	if left != nil {
-		dx = *left
-	}
 	dy := h/2 - th/2
 
 	for y := 0; y < th; y++ {
@@ -597,21 +588,13 @@ func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg colo
 	cursorTop := int((baseline26 - mt.Ascent) >> 6)
 	cursorBot := int((baseline26 + mt.Descent) >> 6)
 
-	// Bố cục neo theo chuỗi ĐẦY ĐỦ: (chữ + trỏ) căn giữa khung, chữ gõ từ điểm trái cố định.
-	// Nhờ vậy chữ không bị xê dịch khi gõ và trỏ ở frame cuối không bị tràn ra ngoài khung.
-	fd := &font.Drawer{Face: face}
-	fullW := int(fd.MeasureString(text) >> 6)
-	gap := 4
-	left := (w - (fullW + gap + cw)) / 2
-	if fullW+gap+cw > w {
-		left = w - (fullW + gap + cw) // chuỗi quá dài: canh phải để trỏ vẫn thấy
-	}
-
 	// vẽ 1 frame: chữ đã gõ + (tuỳ chọn) con trỏ
 	draw := func(partial string, cursorOn bool) *image.RGBA {
-		f := makeBaseAt(partial, fontName, w, h, c, size, bg, &left)
+		f := makeBase(partial, fontName, w, h, c, size, bg)
 		if cursorOn {
-			x := left + int(fd.MeasureString(partial)>>6) + gap
+			d := &font.Drawer{Dst: f, Src: image.NewUniform(c), Face: face}
+			meas := d.MeasureString(partial)
+			x := int(((fixed.I(w)-meas)/2 + meas + fixed.I(4)) >> 6)
 			for yy := cursorTop; yy < cursorBot; yy++ {
 				for xx := x; xx < x+cw; xx++ {
 					if xx >= 0 && xx < w && yy >= 0 && yy < h {
@@ -631,16 +614,15 @@ func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg colo
 	out := make([]*image.RGBA, 0, typeFrames+holdFrames)
 
 	// pha 1: gõ chữ (chỉ phụ thuộc typeFrames)
-	runes := []rune(text) // cắt theo rune, không cắt giữa ký tự UTF-8 (tiếng Việt có dấu)
 	for i := 0; i < typeFrames; i++ {
-		chars := len(runes) * (i + 1) / typeFrames
-		if chars < 1 && len(runes) > 0 {
+		chars := len(text) * (i + 1) / typeFrames
+		if chars < 1 && len(text) > 0 {
 			chars = 1
 		}
-		if chars > len(runes) {
-			chars = len(runes)
+		if chars > len(text) {
+			chars = len(text)
 		}
-		out = append(out, draw(string(runes[:chars]), (i/2)%2 == 0))
+		out = append(out, draw(text[:chars], (i/2)%2 == 0))
 	}
 
 	// pha 2: giữ chữ đầy đủ, trỏ nhấp nháy (chỉ phụ thuộc holdFrames); bắt đầu bằng trỏ sáng
@@ -650,6 +632,273 @@ func fxType(text, fontName string, w, h int, c color.RGBA, size float64, bg colo
 	}
 	for i := 0; i < holdFrames; i++ {
 		out = append(out, draw(text, (i/half)%2 == 0))
+	}
+	return out
+}
+
+// ---------- additional effects ----------
+
+// scaleBrightness nhân toàn bộ pixel với một hệ số (kẹp ở 255).
+func scaleBrightness(src *image.RGBA, f float64) *image.RGBA {
+	dst := cloneRGBA(src)
+	for j := 0; j < len(dst.Pix); j++ {
+		dst.Pix[j] = uint8(float64(dst.Pix[j]) * f)
+	}
+	return dst
+}
+
+// cropShift dịch toàn bộ ảnh theo (dx,dy), phần ngoài biên để trong suốt.
+func cropShift(src *image.RGBA, dx, dy int) *image.RGBA {
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	dst := image.NewRGBA(b)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			sx, sy := x-dx, y-dy
+			if sx < 0 || sx >= w || sy < 0 || sy >= h {
+				continue
+			}
+			si := src.PixOffset(sx, sy)
+			di := dst.PixOffset(x, y)
+			copy(dst.Pix[di:di+4], src.Pix[si:si+4])
+		}
+	}
+	return dst
+}
+
+// fxScan: dải sáng quét dọc màn hình.
+func fxScan(base *image.RGBA, n int, rng *rand.Rand) []*image.RGBA {
+	b := base.Bounds()
+	h := b.Dy()
+	out := make([]*image.RGBA, 0, n)
+	for i := 0; i < n; i++ {
+		f := scaleBrightness(base, 0.85)
+		y := (i * h / n) % h
+		bandH := h / 12
+		if bandH < 2 {
+			bandH = 2
+		}
+		for dy := 0; dy < bandH; dy++ {
+			yy := y + dy
+			if yy < 0 || yy >= h {
+				continue
+			}
+			alpha := 1.0 - float64(dy)/float64(bandH)
+			for x := 0; x < b.Dx(); x++ {
+				di := f.PixOffset(x, yy)
+				r := uint32(f.Pix[di+0])
+				g := uint32(f.Pix[di+1])
+				bl := uint32(f.Pix[di+2])
+				a := uint32(f.Pix[di+3])
+				f.Pix[di+0] = uint8(math.Min(255, float64(r)+120*alpha))
+				f.Pix[di+1] = uint8(math.Min(255, float64(g)+120*alpha))
+				f.Pix[di+2] = uint8(math.Min(255, float64(bl)+120*alpha))
+				f.Pix[di+3] = uint8(math.Min(255, float64(a)+80*alpha))
+			}
+		}
+		f = addScanlines(f, 30, 2)
+		out = append(out, f)
+	}
+	return out
+}
+
+// fxWave: dịch ngang từng dòng theo sóng sin.
+func fxWave(base *image.RGBA, n int, rng *rand.Rand) []*image.RGBA {
+	b := base.Bounds()
+	w, h := b.Dx(), b.Dy()
+	out := make([]*image.RGBA, 0, n)
+	amp := h / 12
+	if amp < 2 {
+		amp = 2
+	}
+	for i := 0; i < n; i++ {
+		f := image.NewRGBA(b)
+		phase := float64(i) / float64(n) * 2 * math.Pi
+		for y := 0; y < h; y++ {
+			dy := int(float64(amp) * math.Sin(phase+float64(y)*0.2))
+			for x := 0; x < w; x++ {
+				sx := x - dy
+				if sx < 0 || sx >= w {
+					continue
+				}
+				si := base.PixOffset(sx, y)
+				di := f.PixOffset(x, y)
+				copy(f.Pix[di:di+4], base.Pix[si:si+4])
+			}
+		}
+		f = addScanlines(f, 25, 2)
+		f = addNoise(f, 0.03, 0.2, rng)
+		out = append(out, f)
+	}
+	return out
+}
+
+// fxSlice: cắt thành từng dải ngang, xáo trộn vị trí + lệch ngang.
+func fxSlice(base *image.RGBA, n int, rng *rand.Rand) []*image.RGBA {
+	b := base.Bounds()
+	w, h := b.Dx(), b.Dy()
+	out := make([]*image.RGBA, 0, n)
+	sliceH := h / 8
+	if sliceH < 2 {
+		sliceH = 2
+	}
+	for i := 0; i < n; i++ {
+		f := image.NewRGBA(b)
+		for y := 0; y < h; y += sliceH {
+			// bốc ngẫu nhiên một dải nguồn
+			srcY := rng.Intn(h - sliceH)
+			dx := rng.Intn(7) - 3
+			for dy := 0; dy < sliceH && y+dy < h; dy++ {
+				for x := 0; x < w; x++ {
+					sx := x - dx
+					if sx < 0 || sx >= w {
+						continue
+					}
+					si := base.PixOffset(sx, srcY+dy)
+					di := f.PixOffset(x, y+dy)
+					copy(f.Pix[di:di+4], base.Pix[si:si+4])
+				}
+			}
+		}
+		f = addScanlines(f, 35, 2)
+		out = append(out, f)
+	}
+	return out
+}
+
+// fxInvert: đảo màu luân phiên giữa các frame (nhấp nháy đảo).
+func fxInvert(base *image.RGBA, n int, rng *rand.Rand) []*image.RGBA {
+	out := make([]*image.RGBA, 0, n)
+	for i := 0; i < n; i++ {
+		f := cloneRGBA(base)
+		if i%3 == 0 {
+			for j := 0; j < len(f.Pix); j += 4 {
+				f.Pix[j+0] = 255 - f.Pix[j+0]
+				f.Pix[j+1] = 255 - f.Pix[j+1]
+				f.Pix[j+2] = 255 - f.Pix[j+2]
+			}
+		}
+		f = addScanlines(f, 30, 2)
+		f = addNoise(f, 0.04, 0.25, rng)
+		out = append(out, f)
+	}
+	return out
+}
+
+// fxPixelate: giảm độ phân giải theo block, block size thay đổi theo frame.
+func fxPixelate(base *image.RGBA, n int, rng *rand.Rand) []*image.RGBA {
+	b := base.Bounds()
+	w, h := b.Dx(), b.Dy()
+	out := make([]*image.RGBA, 0, n)
+	// chu kỳ: nhỏ → lớn → nhỏ
+	sizes := []int{2, 4, 6, 10, 14, 10, 6, 4}
+	for i := 0; i < n; i++ {
+		block := sizes[i%len(sizes)]
+		if block < 1 {
+			block = 1
+		}
+		f := image.NewRGBA(b)
+		for by := 0; by < h; by += block {
+			for bx := 0; bx < w; bx += block {
+				// màu trung bình của block
+				var sr, sg, sb, sa, cnt uint32
+				for y := by; y < by+block && y < h; y++ {
+					for x := bx; x < bx+block && x < w; x++ {
+						si := base.PixOffset(x, y)
+						sr += uint32(base.Pix[si+0])
+						sg += uint32(base.Pix[si+1])
+						sb += uint32(base.Pix[si+2])
+						sa += uint32(base.Pix[si+3])
+						cnt++
+					}
+				}
+				if cnt == 0 {
+					continue
+				}
+				r := uint8(sr / cnt)
+				g := uint8(sg / cnt)
+				bl := uint8(sb / cnt)
+				a := uint8(sa / cnt)
+				for y := by; y < by+block && y < h; y++ {
+					for x := bx; x < bx+block && x < w; x++ {
+						di := f.PixOffset(x, y)
+						f.Pix[di+0], f.Pix[di+1], f.Pix[di+2], f.Pix[di+3] = r, g, bl, a
+					}
+				}
+			}
+		}
+		f = addScanlines(f, 20, 2)
+		out = append(out, f)
+	}
+	return out
+}
+
+// fxBloom: phóng to + mờ + chồng lên bản gốc (bloom/glow).
+func fxBloom(base *image.RGBA, n int, rng *rand.Rand) []*image.RGBA {
+	out := make([]*image.RGBA, 0, n)
+	for i := 0; i < n; i++ {
+		// bản gốc mờ: giảm alpha, rồi phóng to + lệch nhẹ
+		glow := scaleBrightness(base, 0.5)
+		glow = cropShift(glow, rng.Intn(3)-1, rng.Intn(3)-1)
+		f := cloneRGBA(base)
+		// cộng dồn glow (alpha-composite)
+		for j := 0; j < len(f.Pix); j += 4 {
+			a := uint32(glow.Pix[j+3])
+			if a == 0 {
+				continue
+			}
+			inv := 255 - a
+			f.Pix[j+0] = uint8(uint32(glow.Pix[j+0]) + uint32(f.Pix[j+0])*inv/255)
+			f.Pix[j+1] = uint8(uint32(glow.Pix[j+1]) + uint32(f.Pix[j+1])*inv/255)
+			f.Pix[j+2] = uint8(uint32(glow.Pix[j+2]) + uint32(f.Pix[j+2])*inv/255)
+			f.Pix[j+3] = uint8(a + uint32(f.Pix[j+3])*inv/255)
+		}
+		f = addNoise(f, 0.04, 0.2, rng)
+		out = append(out, f)
+	}
+	return out
+}
+
+// fxShake: lắc ngẫu nhiên vị trí ảnh (rung lắc màn hình).
+func fxShake(base *image.RGBA, n int, rng *rand.Rand) []*image.RGBA {
+	out := make([]*image.RGBA, 0, n)
+	for i := 0; i < n; i++ {
+		dx := rng.Intn(9) - 4
+		dy := rng.Intn(5) - 2
+		f := cropShift(base, dx, dy)
+		f = addScanlines(f, 30, 2)
+		f = addNoise(f, 0.03, 0.2, rng)
+		out = append(out, f)
+	}
+	return out
+}
+
+// fxZoom: phóng to/thu nhỏ luân phiên (dolly zoom).
+func fxZoom(base *image.RGBA, n int, rng *rand.Rand) []*image.RGBA {
+	b := base.Bounds()
+	w, h := b.Dx(), b.Dy()
+	out := make([]*image.RGBA, 0, n)
+	for i := 0; i < n; i++ {
+		// factor 1.0 → 1.15 → 1.0
+		t := float64(i) / float64(n)
+		zoom := 1.0 + 0.15*math.Abs(math.Sin(t*math.Pi*2))
+		cx := float64(w) / 2
+		cy := float64(h) / 2
+		f := image.NewRGBA(b)
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				sx := int(cx + (float64(x)-cx)/zoom)
+				sy := int(cy + (float64(y)-cy)/zoom)
+				if sx < 0 || sx >= w || sy < 0 || sy >= h {
+					continue
+				}
+				si := base.PixOffset(sx, sy)
+				di := f.PixOffset(x, y)
+				copy(f.Pix[di:di+4], base.Pix[si:si+4])
+			}
+		}
+		f = addScanlines(f, 25, 2)
+		out = append(out, f)
 	}
 	return out
 }
@@ -752,6 +1001,22 @@ func renderFrames(text, effect, fontName string, w, h int, c1, bgStr string, siz
 		return fxRoll(base, n, rng), nil
 	case "glitch":
 		return fxGlitch(base, n, rng), nil
+	case "scan":
+		return fxScan(base, n, rng), nil
+	case "wave":
+		return fxWave(base, n, rng), nil
+	case "slice":
+		return fxSlice(base, n, rng), nil
+	case "invert":
+		return fxInvert(base, n, rng), nil
+	case "pixelate":
+		return fxPixelate(base, n, rng), nil
+	case "bloom":
+		return fxBloom(base, n, rng), nil
+	case "shake":
+		return fxShake(base, n, rng), nil
+	case "zoom":
+		return fxZoom(base, n, rng), nil
 	}
 	return nil, fmt.Errorf("unknown effect: %s", effect)
 }
@@ -813,7 +1078,7 @@ func handleRender(w http.ResponseWriter, r *http.Request) {
 		seed = rand.Int63()
 	}
 
-	key := cacheKey(fmt.Sprintf("v2|%s|%s|%s|%d|%d|%s|%s|%.2f|%d|%d|%d",
+	key := cacheKey(fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%.2f|%d|%d|%d",
 		text, effect, fontName, width, height, c1, bg, size, fps, n, seed))
 	cf := filepath.Join(cacheDir, key+".gif")
 
@@ -857,7 +1122,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	base := publicBase
-	effects := []string{"vhs", "static", "dropout", "rgb", "flicker", "ghost", "roll", "glitch", "type"}
+	effects := []string{"vhs", "static", "dropout", "rgb", "flicker", "ghost", "roll", "glitch", "type", "scan", "wave", "slice", "invert", "pixelate", "bloom", "shake", "zoom"}
 
 	var cards strings.Builder
 	for _, e := range effects {
@@ -887,7 +1152,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 <table>
 <tr><th>name</th><th>default</th><th>description</th></tr>
 <tr><td>text</td><td>content has been deleted</td><td>text content; use <code>+</code> or <code>%20</code> for spaces</td></tr>
-<tr><td>effect</td><td>vhs</td><td>vhs, static, dropout, rgb, flicker, ghost, roll, glitch, type</td></tr>
+<tr><td>effect</td><td>vhs</td><td>vhs, static, dropout, rgb, flicker, ghost, roll, glitch, type, scan, wave, slice, invert, pixelate, bloom, shake, zoom</td></tr>
 <tr><td>font</td><td>monobold</td><td>see the font list below</td></tr>
 <tr><td>w</td><td>520</td><td>width, 16 to ` + strconv.Itoa(maxW) + `</td></tr>
 <tr><td>h</td><td>60</td><td>height, 16 to ` + strconv.Itoa(maxH) + `</td></tr>
