@@ -3,11 +3,9 @@ FROM golang:1.22-alpine AS build
 
 WORKDIR /src
 
-# copy source trước, không copy go.sum riêng
 COPY go.mod ./
 COPY main.go ./
 
-# -mod=mod: cho phép go build tự thêm entry vào go.mod/go.sum
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -mod=mod \
     -trimpath \
@@ -17,8 +15,6 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # ---------- runtime stage ----------
 FROM alpine:3.20
 
-# Bỏ font-noto-emoji (chỉ có bitmap — Go không render được)
-# Cài wget để tải NotoEmoji-Regular.ttf (outline — Go render được)
 RUN apk add --no-cache \
     ca-certificates \
     tzdata \
@@ -27,7 +23,7 @@ RUN apk add --no-cache \
     wget \
  && mkdir -p /usr/share/fonts/noto \
  && wget -qO /usr/share/fonts/noto/NotoEmoji-Regular.ttf \
-      https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoEmoji-Regular.ttf \
+      https://mirrors.ctan.org/fonts/noto-emoji/NotoEmoji-Regular.ttf \
  && fc-cache -f
 
 WORKDIR /app
