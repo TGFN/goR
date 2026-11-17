@@ -44,9 +44,10 @@ const (
 )
 
 var (
-	cacheDir = getEnv("CACHE_DIR", "cache")
+	isVercel = os.Getenv("VERCEL") == "1"
+	cacheDir = getEnv("CACHE_DIR", func() string { if os.Getenv("VERCEL") == "1" { return "/tmp/cache" }; return "cache" }())
 	port     = getEnv("PORT", "8080")
-	fontsDir = getEnv("FONTS_DIR", "fonts")
+	fontsDir = getEnv("FONTS_DIR", func() string { if os.Getenv("VERCEL") == "1" { return "/tmp/fonts" }; return "fonts" }())
 	faceMu   sync.Mutex
 	faceMap  = map[faceKey]font.Face{}
 	nameRe   = regexp.MustCompile(`^[a-z0-9_-]{1,40}$`)
@@ -1550,12 +1551,17 @@ func handleRender(w http.ResponseWriter, r *http.Request) {
 
 	key := cacheKey(fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%.2f|%d|%d|%d",
 		text, effect, fontName, width, height, c1, bg, size, fps, n, seed))
-	cf := filepath.Join(cacheDir, key+".gif")
 
 	var data []byte
-	if b, err := os.ReadFile(cf); err == nil {
-		data = b
-	} else {
+	var fromCache bool
+	if cacheDir != "" {
+		cf := filepath.Join(cacheDir, key+".gif")
+		if b, err := os.ReadFile(cf); err == nil {
+			data = b
+			fromCache = true
+		}
+	}
+	if !fromCache {
 		frames, err := renderFrames(text, effect, fontName, width, height, c1, bg, size, fps, n, seed)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
@@ -1566,7 +1572,10 @@ func handleRender(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		_ = os.WriteFile(cf, data, 0644)
+		if cacheDir != "" {
+			cf := filepath.Join(cacheDir, key+".gif")
+			_ = os.WriteFile(cf, data, 0644)
+		}
 	}
 
 	w.Header().Set("Content-Type", "image/gif")
@@ -1699,17 +1708,26 @@ func handleFonts(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	_ = os.MkdirAll(fontsDir, 0755)
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		log.Fatal(err)
+	// On Vercel the filesystem is read-only except /tmp.
+	// Use /tmp for cache and fonts when running on Vercel.
+	if err := os.MkdirAll(fontsDir, 0755); err != nil {
+		log.Printf("warn: cannot create fonts dir %s: %v", fontsDir, err)
 	}
-	// tự tải font emoji nếu chưa có ở đâu
-	ensureEmojiFont()
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		log.Printf("warn: cannot create cache dir %s: %v (caching disabled)", cacheDir, err)
+		cacheDir = "" // disable file cache
+	}
+	// Skip automatic emoji font download on Vercel (ephemeral FS + network limits)
+	if !isVercel {
+		ensureEmojiFont()
+	} else {
+		log.Println("running on Vercel: emoji font auto-download skipped")
+	}
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/render", handleRender)
 	http.HandleFunc("/render.gif", handleRender)
 	http.HandleFunc("/fonts", handleFonts)
 	addr := ":" + port
-	log.Printf("listening on %s (cache=%s)", addr, cacheDir)
+	log.Printf("listening on %s (cache=%s, vercel=%v)", addr, cacheDir, isVercel)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
